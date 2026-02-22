@@ -25,11 +25,30 @@ $ErrorActionPreference = 'Stop'
 function Read-Path {
     param(
         [string]$Prompt,
-        [string]$Default
+        [string]$Default,
+        [switch]$MustExist
     )
-    $input_ = Read-Host "$Prompt (default: $Default)"
-    $path = if ($input_.Trim()) { $input_.Trim() } else { $Default }
-    return $path
+    Write-Host "  Tip: You can drag & drop a folder here to paste its path." -ForegroundColor DarkGray
+    Write-Host "  Example: C:\Users\me\DriverBackup, E:\Backup" -ForegroundColor DarkGray
+
+    while ($true) {
+        $input_ = Read-Host "$Prompt (default: $Default)"
+        $path = if ($input_.Trim()) { $input_.Trim() } else { $Default }
+
+        # Strip quotes from drag-and-drop
+        $path = $path.Trim('"').Trim("'")
+
+        if ($MustExist) {
+            if (Test-Path $path) { return $path }
+            Write-Host "  Path not found: $path" -ForegroundColor Red
+        } else {
+            # New path — just verify the drive exists
+            $root = [System.IO.Path]::GetPathRoot($path)
+            if ($root -and (Test-Path $root)) { return $path }
+            Write-Host "  Drive not found: $root" -ForegroundColor Red
+        }
+        Write-Host "  Please try again." -ForegroundColor Yellow
+    }
 }
 
 function Show-Menu {
@@ -71,17 +90,41 @@ function Invoke-Backup {
 
     New-Item -Path $driverDir -ItemType Directory -Force | Out-Null
 
+    # Check disk space on target drive
+    $driveLetter = (Resolve-Path $backupRoot -ErrorAction SilentlyContinue)?.Drive.Name
+    if (-not $driveLetter) { $driveLetter = $backupRoot.Substring(0, 1) }
+    $driveInfo = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
+    if ($driveInfo -and $driveInfo.Free -lt 1GB) {
+        $freeMB = [math]::Round($driveInfo.Free / 1MB, 0)
+        Write-Host "`nWARNING: Drive ${driveLetter}: has only ${freeMB} MB free!" -ForegroundColor Red
+        $proceed = Read-Host "Continue anyway? [y/N]"
+        if (-not $proceed -or $proceed.ToUpper() -ne 'Y') {
+            Write-Host "Cancelled." -ForegroundColor Yellow
+            return
+        }
+    }
+
     # Show driver list
     $drivers = Get-ThirdPartyDrivers
     Write-Host "`nFound $($drivers.Count) drivers:" -ForegroundColor Green
     $drivers | Format-Table -AutoSize | Out-String | Write-Host
 
-    # Export drivers
-    Write-Host "Exporting drivers to: $driverDir" -ForegroundColor Yellow
-    dism /online /export-driver /destination:"$driverDir"
+    # Confirm before export
+    Write-Host "Destination: $dest" -ForegroundColor Cyan
+    $confirm = Read-Host "Proceed with backup? [Y/n]"
+    if ($confirm -and $confirm.ToUpper() -ne 'Y') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    # Export drivers (with log)
+    $logPath = Join-Path $dest "backup-log.txt"
+    Write-Host "`nExporting drivers to: $driverDir" -ForegroundColor Yellow
+    Write-Host "Log file: $logPath" -ForegroundColor DarkGray
+    dism /online /export-driver /destination:"$driverDir" | Tee-Object -FilePath $logPath
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "DISM export failed with exit code $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "DISM export failed with exit code $LASTEXITCODE (see $logPath)" -ForegroundColor Red
         return
     }
 
@@ -112,47 +155,58 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 
 $ErrorActionPreference = 'Stop'
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$driverDir = Join-Path $scriptDir "drivers"
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Driver Restore (Standalone)" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
+try {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $driverDir = Join-Path $scriptDir "drivers"
 
-# Show inventory if available
-$inventoryPath = Join-Path $scriptDir "driver-inventory.txt"
-if (Test-Path $inventoryPath) {
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  Driver Restore (Standalone)" -ForegroundColor Cyan
+    Write-Host "============================================" -ForegroundColor Cyan
+
+    # Show inventory if available
+    $inventoryPath = Join-Path $scriptDir "driver-inventory.txt"
+    if (Test-Path $inventoryPath) {
+        Write-Host ""
+        Get-Content $inventoryPath | Select-Object -First 4 | Write-Host
+    }
+
+    if (-not (Test-Path $driverDir)) {
+        Write-Host "`nERROR: drivers folder not found at $driverDir" -ForegroundColor Red
+        Write-Host "Make sure this script is in the same folder as the 'drivers' directory." -ForegroundColor Yellow
+        pause
+        exit 1
+    }
+
+    $infFiles = Get-ChildItem -Path $driverDir -Filter "*.inf" -Recurse
+    Write-Host "`nFound $($infFiles.Count) driver packages (.inf)" -ForegroundColor Green
+    Write-Host "Source: $driverDir"
     Write-Host ""
-    Get-Content $inventoryPath | Select-Object -First 4 | Write-Host
-}
 
-if (-not (Test-Path $driverDir)) {
-    Write-Host "`nERROR: drivers folder not found at $driverDir" -ForegroundColor Red
-    Write-Host "Make sure this script is in the same folder as the 'drivers' directory." -ForegroundColor Yellow
-    pause
-    exit 1
-}
+    $confirm = Read-Host "Proceed with restore? [Y/n]"
+    if ($confirm -and $confirm.ToUpper() -ne 'Y') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        pause
+        exit 0
+    }
 
-$infFiles = Get-ChildItem -Path $driverDir -Filter "*.inf" -Recurse
-Write-Host "`nFound $($infFiles.Count) driver packages (.inf)" -ForegroundColor Green
-Write-Host "Source: $driverDir"
-Write-Host ""
+    Write-Host "`nRestoring drivers..." -ForegroundColor Yellow
+    dism /online /add-driver /driver:"$driverDir" /recurse /forceunsigned
 
-$confirm = Read-Host "Proceed with restore? [Y/n]"
-if ($confirm -and $confirm.ToUpper() -ne 'Y') {
-    Write-Host "Cancelled." -ForegroundColor Yellow
-    pause
-    exit 0
-}
-
-Write-Host "`nRestoring drivers..." -ForegroundColor Yellow
-dism /online /add-driver /driver:"$driverDir" /recurse /forceunsigned
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nAll drivers restored successfully!" -ForegroundColor Green
-} else {
-    Write-Host "`nDISM finished with exit code $LASTEXITCODE" -ForegroundColor Yellow
-    Write-Host "Some drivers may have been skipped (already installed or not applicable)." -ForegroundColor Yellow
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "`nAll drivers restored successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "`nDISM finished with exit code $LASTEXITCODE" -ForegroundColor Yellow
+        Write-Host "Some drivers may have been skipped (already installed or not applicable)." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host ""
+    Write-Host "====== ERROR ======" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Location: $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor DarkGray
+    Write-Host "Command:  $($_.InvocationInfo.Line.Trim())" -ForegroundColor DarkGray
+    Write-Host "===================" -ForegroundColor Red
 }
 
 pause
@@ -174,23 +228,20 @@ pause
     Write-Host "To restore on a clean install:" -ForegroundColor Cyan
     Write-Host "  1. Copy '${hostname}_${timestamp}' folder to USB" -ForegroundColor Cyan
     Write-Host "  2. Run restore.ps1 as Administrator" -ForegroundColor Cyan
+    Write-Host ""
+
+    $open = Read-Host "Open backup folder in Explorer? [Y/n]"
+    if (-not $open -or $open.ToUpper() -eq 'Y') {
+        explorer.exe $dest
+    }
 }
 
 function Invoke-Restore {
     Write-Host ""
     Write-Host "Enter the path to a backup folder or a folder containing backups." -ForegroundColor Yellow
-    Write-Host "Examples:" -ForegroundColor DarkGray
-    Write-Host "  E:\DriverBackup" -ForegroundColor DarkGray
-    Write-Host "  D:\MYPC_2026-02-22_153000" -ForegroundColor DarkGray
-    Write-Host ""
 
     $defaultRoot = "$env:USERPROFILE\DriverBackup"
-    $restoreRoot = Read-Path -Prompt "Path" -Default $defaultRoot
-
-    if (-not (Test-Path $restoreRoot)) {
-        Write-Host "Path not found: $restoreRoot" -ForegroundColor Red
-        return
-    }
+    $restoreRoot = Read-Path -Prompt "Path" -Default $defaultRoot -MustExist
 
     # Check if the given path itself is a backup (has drivers/ subfolder)
     $directDriverDir = Join-Path $restoreRoot "drivers"
@@ -202,6 +253,12 @@ function Invoke-Restore {
         } else {
             Write-Host "Restoring from $directDriverDir ..." -ForegroundColor Yellow
             dism /online /add-driver /driver:"$directDriverDir" /recurse /forceunsigned
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "`nAll drivers restored successfully!" -ForegroundColor Green
+            } else {
+                Write-Host "`nDISM finished with exit code $LASTEXITCODE" -ForegroundColor Yellow
+                Write-Host "Some drivers may have been skipped (already installed or not applicable)." -ForegroundColor Yellow
+            }
         }
         return
     }
@@ -236,16 +293,33 @@ function Invoke-Restore {
         $driverDir = Join-Path $selectedDir "drivers"
         Write-Host "Restoring from $driverDir ..." -ForegroundColor Yellow
         dism /online /add-driver /driver:"$driverDir" /recurse /forceunsigned
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "`nAll drivers restored successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "`nDISM finished with exit code $LASTEXITCODE" -ForegroundColor Yellow
+            Write-Host "Some drivers may have been skipped (already installed or not applicable)." -ForegroundColor Yellow
+        }
     }
 }
 
 # --- Main ---
-do {
-    $choice = Show-Menu
-    switch ($choice) {
-        '1' { Invoke-Backup; pause }
-        '2' { Invoke-Restore; pause }
-        'Q' { break }
-        default { Write-Host "Invalid option." -ForegroundColor Red; Start-Sleep 1 }
-    }
-} while ($choice -ne 'Q')
+try {
+    do {
+        $choice = Show-Menu
+        switch ($choice) {
+            '1' { Invoke-Backup; pause }
+            '2' { Invoke-Restore; pause }
+            'Q' { break }
+            default { Write-Host "Invalid option." -ForegroundColor Red; Start-Sleep 1 }
+        }
+    } while ($choice -ne 'Q')
+} catch {
+    Write-Host ""
+    Write-Host "====== ERROR ======" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Location: $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor DarkGray
+    Write-Host "Command:  $($_.InvocationInfo.Line.Trim())" -ForegroundColor DarkGray
+    Write-Host "===================" -ForegroundColor Red
+    pause
+}
