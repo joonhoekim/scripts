@@ -91,8 +91,8 @@ function Invoke-Backup {
     New-Item -Path $driverDir -ItemType Directory -Force | Out-Null
 
     # Check disk space on target drive
-    $driveLetter = (Resolve-Path $backupRoot -ErrorAction SilentlyContinue)?.Drive.Name
-    if (-not $driveLetter) { $driveLetter = $backupRoot.Substring(0, 1) }
+    $resolved = Resolve-Path $backupRoot -ErrorAction SilentlyContinue
+    $driveLetter = if ($resolved) { $resolved.Drive.Name } else { $backupRoot.Substring(0, 1) }
     $driveInfo = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
     if ($driveInfo -and $driveInfo.Free -lt 1GB) {
         $freeMB = [math]::Round($driveInfo.Free / 1MB, 0)
