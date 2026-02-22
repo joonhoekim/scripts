@@ -215,6 +215,11 @@ pause
     $restorePath = Join-Path $dest "restore.ps1"
     $restoreScript | Set-Content -Path $restorePath -Encoding UTF8
 
+    # Generate .bat launcher (bypasses execution policy)
+    $batPath = Join-Path $dest "restore.bat"
+    '@echo off
+powershell -ExecutionPolicy Bypass -File "%~dp0restore.ps1"' | Set-Content -Path $batPath -Encoding ASCII
+
     # Summary
     $size = (Get-ChildItem -Path $dest -Recurse | Measure-Object -Property Length -Sum).Sum
     $sizeMB = [math]::Round($size / 1MB, 1)
@@ -227,7 +232,7 @@ pause
     Write-Host ""
     Write-Host "To restore on a clean install:" -ForegroundColor Cyan
     Write-Host "  1. Copy '${hostname}_${timestamp}' folder to USB" -ForegroundColor Cyan
-    Write-Host "  2. Run restore.ps1 as Administrator" -ForegroundColor Cyan
+    Write-Host "  2. Double-click restore.bat (auto-elevates to Admin)" -ForegroundColor Cyan
     Write-Host ""
 
     $open = Read-Host "Open backup folder in Explorer? [Y/n]"
